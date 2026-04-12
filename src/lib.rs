@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Clone, Debug)]
@@ -47,7 +50,11 @@ impl Store {
     }
 
     pub fn put(&mut self, key: &str, value: &str, ttl_secs: u64, read_only: bool) {
-        let existing = self.entries.get(key).map(|ie| ie.entry.version).unwrap_or(0);
+        let existing = self
+            .entries
+            .get(key)
+            .map(|ie| ie.entry.version)
+            .unwrap_or(0);
         let entry = MemEntry {
             key: key.to_string(),
             value: value.to_string(),
@@ -321,5 +328,104 @@ mod tests {
         let (added, removed) = s.diff(&snap);
         assert!(added.contains(&"c".to_string()));
         assert!(removed.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn test_diff_no_changes() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, false);
+        let snap = s.snapshot("s1");
+        let (added, removed) = s.diff(&snap);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_search_skips_expired() {
+        let mut s = Store::new();
+        s.put("user:1", "alice", 0, false);
+        s.put("user:2", "bob", 1, false);
+        thread::sleep(Duration::from_secs(2));
+        let results = s.search("user:");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "user:1");
+    }
+
+    #[test]
+    fn test_gc_no_expired() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, false);
+        s.put("b", "2", 60, false);
+        let removed = s.gc();
+        assert_eq!(removed, 0);
+        assert_eq!(s.count(), 2);
+    }
+
+    #[test]
+    fn test_snapshot_excludes_expired() {
+        let mut s = Store::new();
+        s.put("perm", "val", 0, false);
+        s.put("temp", "gone", 1, false);
+        thread::sleep(Duration::from_secs(2));
+        let snap = s.snapshot("check");
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].0, "perm");
+    }
+
+    #[test]
+    fn test_restore_sets_ttl_zero() {
+        let mut s = Store::new();
+        s.put("a", "1", 1, false);
+        thread::sleep(Duration::from_millis(50));
+        let snap = s.snapshot("pre-restore");
+        s.restore(&snap);
+        assert_eq!(s.get("a"), Some("1".to_string()));
+    }
+
+    #[test]
+    fn test_update_expired_fails() {
+        let mut s = Store::new();
+        s.put("a", "1", 1, false);
+        thread::sleep(Duration::from_secs(2));
+        assert!(!s.update("a", "2"));
+    }
+
+    #[test]
+    fn test_put_readonly_flag() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, true);
+        let entry = &s.entries.get("a").unwrap().entry;
+        assert!(entry.read_only);
+    }
+
+    #[test]
+    fn test_overwrite_increments_version() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, false);
+        s.put("a", "2", 0, true); // overwrite with read_only
+        assert_eq!(s.get("a"), Some("2".to_string()));
+        let entry = &s.entries.get("a").unwrap().entry;
+        assert_eq!(entry.version, 2);
+        assert!(entry.read_only);
+    }
+
+    #[test]
+    fn test_empty_store_snapshot() {
+        let s = Store::new();
+        let snap = s.snapshot("empty");
+        assert!(snap.entries.is_empty());
+        assert_eq!(snap.label, "empty");
+    }
+
+    #[test]
+    fn test_restore_from_empty_snapshot() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, false);
+        let snap = Snapshot {
+            entries: vec![],
+            label: "empty".to_string(),
+        };
+        s.restore(&snap);
+        assert_eq!(s.count(), 0);
     }
 }
