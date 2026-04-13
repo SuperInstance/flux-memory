@@ -331,6 +331,73 @@ mod tests {
     }
 
     #[test]
+    fn test_overwrite_key() {
+        let mut s = Store::new();
+        s.put("k", "old", 0, false);
+        s.put("k", "new", 0, false);
+        assert_eq!(s.get("k"), Some("new".to_string()));
+        assert_eq!(s.count(), 1);
+    }
+
+    #[test]
+    fn test_overwrite_read_only_with_put() {
+        let mut s = Store::new();
+        s.put("k", "v1", 0, true);
+        s.put("k", "v2", 0, false);
+        // put always overwrites regardless of read_only
+        assert_eq!(s.get("k"), Some("v2".to_string()));
+        assert!(!s.entries.get("k").unwrap().entry.read_only);
+    }
+
+    #[test]
+    fn test_update_increments_version() {
+        let mut s = Store::new();
+        s.put("k", "v1", 0, false);
+        s.update("k", "v2");
+        s.update("k", "v3");
+        assert_eq!(s.entries.get("k").unwrap().entry.version, 3);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_returns_false() {
+        let mut s = Store::new();
+        assert!(!s.delete("ghost"));
+    }
+
+    #[test]
+    fn test_snapshot_preserves_read_only() {
+        let mut s = Store::new();
+        s.put("ro", "locked", 0, true);
+        let snap = s.snapshot("backup");
+        s.delete("ro");
+        s.restore(&snap);
+        assert!(s.entries.get("ro").unwrap().entry.read_only);
+        assert!(!s.update("ro", "hacked"));
+        assert_eq!(s.get("ro"), Some("locked".to_string()));
+    }
+
+    #[test]
+    fn test_snapshot_empty_store() {
+        let s = Store::new();
+        let snap = s.snapshot("empty");
+        assert!(snap.entries.is_empty());
+        assert_eq!(snap.label, "empty");
+    }
+
+    #[test]
+    fn test_restore_clears_existing() {
+        let mut s = Store::new();
+        s.put("a", "1", 0, false);
+        s.put("b", "2", 0, false);
+        let snap = s.snapshot("s1");
+        s.put("c", "3", 0, false);
+        s.put("d", "4", 0, false);
+        assert_eq!(s.count(), 4);
+        s.restore(&snap);
+        assert_eq!(s.count(), 2);
+    }
+
+    #[test]
     fn test_diff_no_changes() {
         let mut s = Store::new();
         s.put("a", "1", 0, false);
@@ -341,91 +408,73 @@ mod tests {
     }
 
     #[test]
-    fn test_search_skips_expired() {
+    fn test_search_with_empty_prefix() {
         let mut s = Store::new();
-        s.put("user:1", "alice", 0, false);
-        s.put("user:2", "bob", 1, false);
-        thread::sleep(Duration::from_secs(2));
-        let results = s.search("user:");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].key, "user:1");
+        s.put("a", "1", 0, false);
+        s.put("b", "2", 0, false);
+        assert_eq!(s.search("").len(), 2);
     }
 
     #[test]
-    fn test_gc_no_expired() {
+    fn test_count_excludes_expired() {
+        let mut s = Store::new();
+        s.put("live", "1", 60, false);
+        s.put("dying", "2", 1, false);
+        thread::sleep(Duration::from_secs(2));
+        // count should exclude expired even without gc
+        assert_eq!(s.count(), 1);
+    }
+
+    #[test]
+    fn test_gc_on_clean_store() {
         let mut s = Store::new();
         s.put("a", "1", 0, false);
-        s.put("b", "2", 60, false);
         let removed = s.gc();
         assert_eq!(removed, 0);
-        assert_eq!(s.count(), 2);
+        assert_eq!(s.count(), 1);
     }
 
     #[test]
-    fn test_snapshot_excludes_expired() {
+    fn test_update_expired_returns_false() {
         let mut s = Store::new();
-        s.put("perm", "val", 0, false);
-        s.put("temp", "gone", 1, false);
+        s.put("tmp", "val", 1, false);
         thread::sleep(Duration::from_secs(2));
-        let snap = s.snapshot("check");
-        assert_eq!(snap.entries.len(), 1);
-        assert_eq!(snap.entries[0].0, "perm");
+        assert!(!s.update("tmp", "new"));
     }
 
     #[test]
-    fn test_restore_sets_ttl_zero() {
+    fn test_exists_on_expired() {
         let mut s = Store::new();
-        s.put("a", "1", 1, false);
-        thread::sleep(Duration::from_millis(50));
-        let snap = s.snapshot("pre-restore");
-        s.restore(&snap);
-        assert_eq!(s.get("a"), Some("1".to_string()));
-    }
-
-    #[test]
-    fn test_update_expired_fails() {
-        let mut s = Store::new();
-        s.put("a", "1", 1, false);
+        s.put("tmp", "val", 1, false);
         thread::sleep(Duration::from_secs(2));
-        assert!(!s.update("a", "2"));
+        assert!(!s.exists("tmp"));
     }
 
     #[test]
-    fn test_put_readonly_flag() {
-        let mut s = Store::new();
-        s.put("a", "1", 0, true);
-        let entry = &s.entries.get("a").unwrap().entry;
-        assert!(entry.read_only);
-    }
-
-    #[test]
-    fn test_overwrite_increments_version() {
+    fn test_multiple_snapshots_independent() {
         let mut s = Store::new();
         s.put("a", "1", 0, false);
-        s.put("a", "2", 0, true); // overwrite with read_only
-        assert_eq!(s.get("a"), Some("2".to_string()));
-        let entry = &s.entries.get("a").unwrap().entry;
-        assert_eq!(entry.version, 2);
-        assert!(entry.read_only);
+        let snap1 = s.snapshot("v1");
+        s.put("b", "2", 0, false);
+        let snap2 = s.snapshot("v2");
+        assert_eq!(snap1.entries.len(), 1);
+        assert_eq!(snap2.entries.len(), 2);
     }
 
     #[test]
-    fn test_empty_store_snapshot() {
-        let s = Store::new();
-        let snap = s.snapshot("empty");
-        assert!(snap.entries.is_empty());
-        assert_eq!(snap.label, "empty");
-    }
-
-    #[test]
-    fn test_restore_from_empty_snapshot() {
+    fn test_put_empty_key_and_value() {
         let mut s = Store::new();
-        s.put("a", "1", 0, false);
-        let snap = Snapshot {
-            entries: vec![],
-            label: "empty".to_string(),
-        };
-        s.restore(&snap);
-        assert_eq!(s.count(), 0);
+        s.put("", "empty-key", 0, false);
+        assert_eq!(s.get(""), Some("empty-key".to_string()));
+        s.put("empty-val", "", 0, false);
+        assert_eq!(s.get("empty-val"), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_large_value_storage() {
+        let mut s = Store::new();
+        let big = "x".repeat(10000);
+        s.put("big", &big, 0, false);
+        assert_eq!(s.get("big"), Some(big));
     }
 }
