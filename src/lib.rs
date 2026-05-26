@@ -42,6 +42,12 @@ pub struct Store {
     entries: HashMap<String, InternalEntry>,
 }
 
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Store {
     pub fn new() -> Self {
         Store {
@@ -86,7 +92,7 @@ impl Store {
     }
 
     pub fn exists(&self, key: &str) -> bool {
-        self.entries.get(key).map_or(false, |ie| !ie.is_expired())
+        self.entries.get(key).is_some_and(|ie| !ie.is_expired())
     }
 
     pub fn update(&mut self, key: &str, value: &str) -> bool {
